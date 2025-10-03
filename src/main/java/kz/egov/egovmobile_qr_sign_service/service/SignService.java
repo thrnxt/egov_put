@@ -153,8 +153,36 @@ public class SignService {
         SignTransaction tx = txOpt.get();
         log.debug("Transaction status: {}", tx.getStatus());
 
+        // Проверка статуса транзакции (только PENDING разрешен для продакшена)
         if (!"PENDING".equals(tx.getStatus())) {
-            log.error("Transaction status is not PENDING, current status: {}", tx.getStatus());
+            String errorMessage;
+            switch (tx.getStatus()) {
+                case "SIGNED":
+                    errorMessage = String.format(
+                        "Транзакция %s уже подписана. Документы были успешно подписаны ранее. " +
+                        "Повторная подпись не разрешена по соображениям безопасности.",
+                        transactionId
+                    );
+                    log.warn(errorMessage);
+                    log.info("Transaction {} signed at: {}", transactionId, tx.getCreationDate());
+                    break;
+                case "FAILED":
+                    errorMessage = String.format(
+                        "Транзакция %s находится в статусе FAILED. " +
+                        "Предыдущая попытка подписания завершилась неудачей. " +
+                        "Создайте новую транзакцию для повторной попытки.",
+                        transactionId
+                    );
+                    log.error(errorMessage);
+                    break;
+                default:
+                    errorMessage = String.format(
+                        "Транзакция %s находится в недопустимом статусе: %s. " +
+                        "Ожидается статус PENDING.",
+                        transactionId, tx.getStatus()
+                    );
+                    log.error(errorMessage);
+            }
             return false;
         }
 

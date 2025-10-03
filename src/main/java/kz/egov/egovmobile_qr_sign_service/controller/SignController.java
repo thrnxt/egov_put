@@ -137,8 +137,19 @@ public class SignController {
             return ResponseEntity.ok().body(Map.of("backUrl", backUrl));
         } else {
             log.error("Signature validation failed for transactionId: {}", transactionId);
+            
+            // Проверяем, не является ли причиной неудачи уже подписанная транзакция
+            Optional<Api1Response> txCheck = signService.generateApi1Response(transactionId);
+            if (txCheck.isPresent()) {
+                // Детальное сообщение будет в логах, возвращаем общее сообщение клиенту
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                        "Подписанные документы не прошли валидацию подписи. Проверьте статус транзакции или создайте новую.", 
+                        "Қол қойылған құжаттар қолтаңба валидациясынан өтпеді. Транзакция күйін тексеріңіз немесе жаңасын жасаңыз.");
+            }
+            
             return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                    "Подписанные документы не прошли валидацию подписи.", "Қол қойылған құжаттар қолтаңба валидациясынан өтпеді.");
+                    "Подписанные документы не прошли валидацию подписи.", 
+                    "Қол қойылған құжаттар қолтаңба валидациясынан өтпеді.");
         }
     }
 }
