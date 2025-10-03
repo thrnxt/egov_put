@@ -279,8 +279,19 @@ public class SignService {
         String cmsBase64 = doc.document().file().data();
         log.debug("CMS data length: {} characters", cmsBase64.length());
         
-        // NCANode v3 использует /cms/verify для проверки CMS подписи
-        return callNcanodeVerify("/cms/verify", "{\"cms\": \"" + cmsBase64 + "\"}");
+        // NCANode v3 проверяет CMS согласно Приказу №1187:
+        // 1) Проверка ЭЦП (хэш, контрольные суммы)
+        // 2) Проверка срока действия сертификата
+        // 3) Проверка на отозванность (CRL/OCSP)
+        // 4) Проверка цепочки сертификатов до корневого УЦ
+        // 5) Проверка области использования (KeyUsage)
+        // Параметр "checkOcsp": true включает онлайн проверку через OCSP
+        // Параметр "checkCrl": true включает проверку через CRL
+        String requestBody = String.format(
+            "{\"cms\": \"%s\", \"checkOcsp\": true, \"checkCrl\": true}",
+            cmsBase64
+        );
+        return callNcanodeVerify("/cms/verify", requestBody);
     }
 
     private boolean validateXmlSignature(Api2Response.DocumentToSign doc) {
@@ -292,8 +303,17 @@ public class SignService {
         String xmlData = doc.documentXml();
         log.debug("XML data length: {} characters", xmlData.length());
         
-        // NCANode v3 использует /xml/verify для проверки XML подписи
-        return callNcanodeVerify("/xml/verify", "{\"xml\": \"" + xmlData + "\"}");
+        // NCANode v3 проверяет XML подпись согласно Приказу №1187:
+        // 1) Проверка ЭЦП в XML
+        // 2) Проверка срока действия сертификата
+        // 3) Проверка на отозванность (CRL/OCSP)
+        // 4) Проверка цепочки сертификатов
+        // 5) Проверка области использования (KeyUsage)
+        String requestBody = String.format(
+            "{\"xml\": \"%s\", \"checkOcsp\": true, \"checkCrl\": true}",
+            xmlData.replace("\"", "\\\"").replace("\n", "\\n")
+        );
+        return callNcanodeVerify("/xml/verify", requestBody);
     }
 
     private boolean validateBytesSignature(Api2Response.DocumentToSign doc) {
@@ -311,6 +331,7 @@ public class SignService {
 
     private boolean callNcanodeVerify(String endpoint, String body) {
         log.debug("Calling NCANode endpoint: {} with body length: {} characters", endpoint, body.length());
+        log.debug("Request body: {}", body);
 
         try {
             Mono<String> response = webClient.post()
@@ -326,6 +347,25 @@ public class SignService {
             if (result != null) {
                 JsonNode jsonNode = objectMapper.readTree(result);
                 boolean isValid = jsonNode.has("valid") && jsonNode.get("valid").asBoolean();
+                
+                // Логируем детали проверки согласно Приказу №1187
+                if (jsonNode.has("certInfo")) {
+                    JsonNode certInfo = jsonNode.get("certInfo");
+                    log.debug("Certificate validation details:");
+                    log.debug("  - Subject: {}", certInfo.has("subject") ? certInfo.get("subject").asText() : "N/A");
+                    log.debug("  - Issuer: {}", certInfo.has("issuer") ? certInfo.get("issuer").asText() : "N/A");
+                    log.debug("  - Valid from: {}", certInfo.has("notBefore") ? certInfo.get("notBefore").asText() : "N/A");
+                    log.debug("  - Valid to: {}", certInfo.has("notAfter") ? certInfo.get("notAfter").asText() : "N/A");
+                }
+                
+                if (!isValid && jsonNode.has("message")) {
+                    log.error("Signature validation failed: {}", jsonNode.get("message").asText());
+                }
+                
+                if (jsonNode.has("revoked") && jsonNode.get("revoked").asBoolean()) {
+                    log.error("Certificate is revoked (СОРС/OCSP check failed)");
+                }
+                
                 log.debug("Parsed valid flag from NCANode response: {}", isValid);
                 return isValid;
             } else {
