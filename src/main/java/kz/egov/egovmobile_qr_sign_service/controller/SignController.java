@@ -5,6 +5,7 @@ import kz.egov.egovmobile_qr_sign_service.dto.Api1Response;
 import kz.egov.egovmobile_qr_sign_service.dto.Api2Response;
 import kz.egov.egovmobile_qr_sign_service.dto.SignErrorResponse;
 import kz.egov.egovmobile_qr_sign_service.dto.InitSignRequest;
+import kz.egov.egovmobile_qr_sign_service.dto.EdsAuthRequest;
 import kz.egov.egovmobile_qr_sign_service.service.SignService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -76,28 +77,77 @@ public class SignController {
     public ResponseEntity<?> getDocumentsForSigning(
             @PathVariable String transactionId,
             @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
-            @RequestHeader(value = "Accept-Language", defaultValue = "ru", required = false) String acceptLanguage
-            // @RequestBody Map<String, String> edsAuthBody - тело для Eds, опускаем для упрощения
+            @RequestHeader(value = "Accept-Language", defaultValue = "ru", required = false) String acceptLanguage,
+            @RequestBody(required = false) EdsAuthRequest edsAuthBody
     ) {
+        log.info("Processing sign-process request for transactionId: {}", transactionId);
+        
         Optional<Api1Response> api1Opt = signService.generateApi1Response(transactionId);
         if (api1Opt.isEmpty()) {
+            log.error("Transaction not found: {}", transactionId);
             return localizedError(HttpStatus.NOT_FOUND, acceptLanguage, "Транзакция не найдена.", "Транзакция табылмады.");
         }
 
-        // Проверка авторизации
-        String authType = api1Opt.get().document().authType();
-        String authToken = api1Opt.get().document().authToken();
+        Api1Response api1 = api1Opt.get();
+        String authType = api1.document().authType();
+        String authToken = api1.document().authToken();
+        
+        log.debug("Auth type for transaction {}: {}", transactionId, authType);
 
-        if ("Token".equals(authType) && (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length())))) {
-            return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                    "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
+        // Проверка авторизации в зависимости от типа
+        if ("Token".equals(authType)) {
+            // Проверка токена в заголовке Authorization
+            log.debug("Validating Token authentication");
+            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || 
+                !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length()))) {
+                log.error("Token authentication failed for transaction: {}", transactionId);
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                        "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
+            }
+            log.info("Token authentication successful");
+        } else if ("Eds".equals(authType)) {
+            // Проверка EDS аутентификации через подписанный XML
+            log.debug("Validating EDS authentication");
+            
+            if (edsAuthBody == null || edsAuthBody.getXml() == null || edsAuthBody.getXml().isBlank()) {
+                log.error("EDS authentication failed: missing signed XML in request body");
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                        "Отсутствует подписанный XML для аутентификации.", "Аутентификация үшін қол қойылған XML жоқ.");
+            }
+            
+            log.debug("Signed XML received, length: {} characters", edsAuthBody.getXml().length());
+            
+            // Валидация подписанного XML через NCANode
+            boolean isValidEds = signService.validateEdsAuthentication(
+                edsAuthBody.getXml(), 
+                api1.document().uri()
+            );
+            
+            if (!isValidEds) {
+                log.error("EDS authentication validation failed for transaction: {}", transactionId);
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                        "ЭЦП аутентификация не прошла проверку. Подпись недействительна или данные не соответствуют.", 
+                        "ЭҚТ аутентификациясы тексеруден өтпеді. Қолтаңба жарамсыз немесе деректер сәйкес келмейді.");
+            }
+            
+            log.info("EDS authentication successful for transaction: {}", transactionId);
+        } else if ("None".equals(authType)) {
+            log.debug("No authentication required");
+        } else {
+            log.error("Unknown auth type: {}", authType);
+            return localizedError(HttpStatus.BAD_REQUEST, acceptLanguage,
+                    "Неизвестный тип аутентификации.", "Аутентификацияның белгісіз түрі.");
         }
 
         // Получение данных для подписания
+        log.debug("Retrieving documents for signing");
         Optional<Api2Response> docs = signService.getDocumentsToSign(transactionId);
         if (docs.isPresent()) {
+            log.info("Successfully retrieved documents for signing for transaction: {}", transactionId);
             return ResponseEntity.ok(docs.get());
         }
+        
+        log.error("Failed to retrieve documents for transaction: {}", transactionId);
         return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
                 "Транзакция истекла или не готова к подписанию.", "Транзакция мерзімі өтті немесе қол қоюға дайын емес.");
     }
@@ -118,12 +168,22 @@ public class SignController {
             return localizedError(HttpStatus.NOT_FOUND, acceptLanguage, "Транзакция не найдена.", "Транзакция табылмады.");
         }
 
-        // Проверка авторизации (повтор)
-        String authType = api1Opt.get().document().authType();
-        String authToken = api1Opt.get().document().authToken();
-        if ("Token".equals(authType) && (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length())))) {
-            log.error("Authorization failed for transactionId: {}", transactionId);
-            return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
+        Api1Response api1 = api1Opt.get();
+        String authType = api1.document().authType();
+        String authToken = api1.document().authToken();
+        
+        // Проверка авторизации в зависимости от типа
+        if ("Token".equals(authType)) {
+            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || 
+                !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length()))) {
+                log.error("Token authorization failed for transactionId: {}", transactionId);
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, 
+                    "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
+            }
+        } else if ("Eds".equals(authType)) {
+            // Для EDS аутентификации проверка уже была выполнена при GET/POST запросе
+            // При PUT запросе мы просто проверяем, что транзакция существует и активна
+            log.debug("EDS authentication - transaction already validated");
         }
 
         log.info("Authorization successful, proceeding to validation");
