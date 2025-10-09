@@ -12,6 +12,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.validation.annotation.Validated;
+import jakarta.validation.Valid;
 import java.util.Map;
 import java.util.Optional;
 
@@ -37,7 +39,7 @@ public class SignController {
     }
 
     @PostMapping("/mgovSign")
-    public ResponseEntity<Map<String, String>> initiateSigning(@RequestBody InitSignRequest body,
+    public ResponseEntity<Map<String, String>> initiateSigning(@Valid @RequestBody InitSignRequest body,
                                                                HttpServletRequest request) {
         String clientIdentifier = request.getHeader("X-Client-ID");
         if (clientIdentifier == null) clientIdentifier = "unknown-client";
@@ -166,7 +168,6 @@ public class SignController {
             log.info("Successfully retrieved documents for signing for transaction: {}", transactionId);
             return ResponseEntity.ok(docs.get());
         }
-        String sml = 
         log.error("Failed to retrieve documents for transaction: {}", transactionId);
         return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
                 "Транзакция истекла или не готова к подписанию.", "Транзакция мерзімі өтті немесе қол қоюға дайын емес.");
@@ -177,7 +178,7 @@ public class SignController {
             @PathVariable String transactionId,
             @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
             @RequestHeader(value = "Accept-Language", defaultValue = "ru", required = false) String acceptLanguage,
-            @RequestBody Api2Response signedData
+            @Valid @RequestBody Api2Response signedData
     ) {
         log.info("Received PUT request for transactionId: {}", transactionId);
         log.debug("Signed data: {}", signedData);

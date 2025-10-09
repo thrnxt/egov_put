@@ -17,9 +17,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.Optional;
 import java.util.UUID;
@@ -42,6 +44,12 @@ public class SignService {
 
     @Value("${ncanode.url}")
     private String ncanodeUrl;
+
+    @Value("${ncanode.retry-attempts:3}")
+    private int retryAttempts;
+
+    @Value("${ncanode.retry-delay:1s}")
+    private Duration retryDelay;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     public Optional<String> validateInitRequest(InitSignRequest request) {
@@ -323,7 +331,22 @@ public class SignService {
                 .header("Content-Type", "application/json")
                 .bodyValue(body)
                 .retrieve()
-                .bodyToMono(String.class);
+                .bodyToMono(String.class)
+                .retryWhen(Retry.backoff(retryAttempts, retryDelay)
+                    .filter(this::isRetryableException)
+                    .doBeforeRetry(retrySignal -> 
+                        log.warn("Retrying NCANode call to {} (attempt {}/{}): {}", 
+                            endpoint, 
+                            retrySignal.totalRetries() + 1, 
+                            retryAttempts,
+                            retrySignal.failure().getMessage())
+                    )
+                )
+                .onErrorResume(throwable -> {
+                    log.error("NCANode call failed after {} retries to {}: {}", 
+                        retryAttempts, endpoint, throwable.getMessage());
+                    return Mono.empty();
+                });
 
             String result = response.block();
             log.debug("NCANode response for {}: {}", endpoint, result);
@@ -336,12 +359,28 @@ public class SignService {
             } else {
                 log.error("NCANode returned null response for endpoint: {}", endpoint);
             }
-        } catch (WebClientResponseException e) {
-            log.error("WebClient error calling NCANode ({}): {} - Response body: {}", endpoint, e.getMessage(), e.getResponseBodyAsString());
         } catch (Exception e) {
             log.error("General error calling NCANode ({}): {}", endpoint, e.getMessage(), e);
         }
         return false;
+    }
+
+    /**
+     * Определить, стоит ли повторять запрос при данной ошибке
+     */
+    private boolean isRetryableException(Throwable throwable) {
+        if (throwable instanceof WebClientResponseException) {
+            WebClientResponseException ex = (WebClientResponseException) throwable;
+            int statusCode = ex.getStatusCode().value();
+            
+            // Повторяем при временных ошибках (5xx) и таймаутах
+            return statusCode >= 500 || statusCode == 408 || statusCode == 429;
+        }
+        
+        // Повторяем при сетевых ошибках (таймауты, соединение)
+        return throwable instanceof java.util.concurrent.TimeoutException ||
+               throwable instanceof java.net.ConnectException ||
+               throwable instanceof java.net.SocketTimeoutException;
     }
 
     /**
@@ -375,7 +414,21 @@ public class SignService {
                 .header("Content-Type", "application/json")
                 .bodyValue(requestBody)
                 .retrieve()
-                .bodyToMono(String.class);
+                .bodyToMono(String.class)
+                .retryWhen(Retry.backoff(retryAttempts, retryDelay)
+                    .filter(this::isRetryableException)
+                    .doBeforeRetry(retrySignal -> 
+                        log.warn("Retrying EDS validation (attempt {}/{}): {}", 
+                            retrySignal.totalRetries() + 1, 
+                            retryAttempts,
+                            retrySignal.failure().getMessage())
+                    )
+                )
+                .onErrorResume(throwable -> {
+                    log.error("EDS validation failed after {} retries: {}", 
+                        retryAttempts, throwable.getMessage());
+                    return Mono.empty();
+                });
 
             String result = response.block();
             log.debug("NCANode XML verification response: {}", result);
