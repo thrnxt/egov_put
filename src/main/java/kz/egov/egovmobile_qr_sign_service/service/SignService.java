@@ -3,8 +3,11 @@ package kz.egov.egovmobile_qr_sign_service.service;
 import kz.egov.egovmobile_qr_sign_service.dto.Api1Response;
 import kz.egov.egovmobile_qr_sign_service.dto.Api2Response;
 import kz.egov.egovmobile_qr_sign_service.model.SignTransaction;
+import kz.egov.egovmobile_qr_sign_service.model.Organisation;
+import kz.egov.egovmobile_qr_sign_service.model.TransactionStatusHistory;
 import kz.egov.egovmobile_qr_sign_service.dto.InitSignRequest;
 import kz.egov.egovmobile_qr_sign_service.repository.TransactionRepository;
+import kz.egov.egovmobile_qr_sign_service.repository.TransactionStatusHistoryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,10 +30,15 @@ import java.util.UUID;
 public class SignService {
 
     private final TransactionRepository repository;
+    private final OrganisationService organisationService;
+    private final TransactionStatusHistoryRepository statusHistoryRepository;
     private static final String API2_URI_TEMPLATE = "/api/v1/sign-process/";
 
     @Autowired
     private WebClient webClient;
+
+    @Autowired
+    private org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
 
     @Value("${ncanode.url}")
     private String ncanodeUrl;
@@ -79,57 +87,74 @@ public class SignService {
 
 
     // Логика инициации (вызывается нашим клиентом для запуска процесса)
+    // Возвращает массив: [transactionId, rawToken (может быть null)]
     @Transactional
-    public String initNewSigningTransaction(String baseUrl, InitSignRequest request, String clientIdentifier) {
+    public String[] initNewSigningTransaction(String baseUrl, InitSignRequest request, String clientIdentifier) {
         String id = UUID.randomUUID().toString();
 
         String authType = request.getDocument() != null ? request.getDocument().getAuthType() : "None";
-        String authToken = request.getDocument() != null ? request.getDocument().getAuthToken() : null;
-        if ("Token".equals(authType) && (authToken == null || authToken.isBlank())) {
-            authToken = "token-auth-" + UUID.randomUUID();
+        String rawToken = request.getDocument() != null ? request.getDocument().getAuthToken() : null;
+        
+        // Генерация токена, если не передан
+        if ("Token".equals(authType) && (rawToken == null || rawToken.isBlank())) {
+            rawToken = "token-auth-" + UUID.randomUUID();
+        }
+        
+        // Хеширование токена для безопасного хранения
+        String authTokenHash = null;
+        if (rawToken != null && !rawToken.isBlank()) {
+            authTokenHash = passwordEncoder.encode(rawToken);
+            log.debug("Token hashed for transaction: {}", id);
         }
 
         String api2Uri = (baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length()-1) : baseUrl) + API2_URI_TEMPLATE + id;
 
+        // Найти или создать организацию
+        Organisation organisation = organisationService.findOrCreateOrganisation(request.getOrganisation());
+        log.info("Organisation resolved: ID={}, BIN={}", organisation.getId(), organisation.getBin());
+
         SignTransaction transaction = new SignTransaction();
         transaction.setTransactionId(id);
+        transaction.setOrganisation(organisation);
         transaction.setExpiryDate(request.getExpiryDate() != null ? request.getExpiryDate() : ZonedDateTime.now().plusHours(24));
         transaction.setAuthType(authType);
-        transaction.setAuthToken(authToken);
+        transaction.setAuthTokenHash(authTokenHash);
         transaction.setDescription(request.getDescription() != null ? request.getDescription() : ("Подписание документов для клиента: " + clientIdentifier));
         transaction.setApi2Uri(api2Uri);
-        if (request.getOrganisation() != null) {
-            transaction.setOrgNameRu(request.getOrganisation().getNameRu());
-            transaction.setOrgNameKz(request.getOrganisation().getNameKz());
-            transaction.setOrgNameEn(request.getOrganisation().getNameEn());
-            transaction.setOrgBin(request.getOrganisation().getBin());
-        }
         transaction.setBackUrl(request.getBackUrl() != null ? request.getBackUrl() : (baseUrl + "/back"));
         transaction.setStatus("PENDING");
         transaction.setDocumentsForSigning(request.getDocuments());
 
         repository.save(transaction);
-        return id;
+        
+        // Записать начальный статус в историю
+        recordStatusChange(id, null, "PENDING", "Transaction created");
+        
+        log.info("New signing transaction created: {}", id);
+        
+        // Возвращаем ID и сырой токен (для Token auth)
+        return new String[]{id, rawToken};
     }
 
     public Optional<Api1Response> generateApi1Response(String transactionId) {
-        return repository.findById(transactionId).map(tx ->
-                Api1Response.builder()
-                        .description(tx.getDescription())
-                        .expiryDate(tx.getExpiryDate())
-                        .organisation(Api1Response.Organisation.builder()
-                                .nameRu(tx.getOrgNameRu())
-                                .nameKz(tx.getOrgNameKz())
-                                .nameEn(tx.getOrgNameEn())
-                                .bin(tx.getOrgBin())
-                                .build())
-                        .document(Api1Response.Document.builder()
-                                .uri(tx.getApi2Uri())
-                                .authType(tx.getAuthType())
-                                .authToken(tx.getAuthToken())
-                                .build())
-                        .build()
-        );
+        return repository.findById(transactionId).map(tx -> {
+            Organisation org = tx.getOrganisation();
+            return Api1Response.builder()
+                    .description(tx.getDescription())
+                    .expiryDate(tx.getExpiryDate())
+                    .organisation(Api1Response.Organisation.builder()
+                            .nameRu(org != null ? org.getNameRu() : null)
+                            .nameKz(org != null ? org.getNameKz() : null)
+                            .nameEn(org != null ? org.getNameEn() : null)
+                            .bin(org != null ? org.getBin() : null)
+                            .build())
+                    .document(Api1Response.Document.builder()
+                            .uri(tx.getApi2Uri())
+                            .authType(tx.getAuthType())
+                            .authToken(null) // НЕ отдаем токен в ответе! Клиент уже знает его
+                            .build())
+                    .build();
+        });
     }
 
     public Optional<Api2Response> getDocumentsToSign(String transactionId) {
@@ -150,10 +175,11 @@ public class SignService {
         }
 
         SignTransaction tx = txOpt.get();
-        log.debug("Transaction status: {}", tx.getStatus());
+        String oldStatus = tx.getStatus();
+        log.debug("Transaction status: {}", oldStatus);
 
-        if (!"PENDING".equals(tx.getStatus())) {
-            log.error("Transaction status is not PENDING, current status: {}", tx.getStatus());
+        if (!"PENDING".equals(oldStatus)) {
+            log.error("Transaction status is not PENDING, current status: {}", oldStatus);
             return false;
         }
 
@@ -166,11 +192,19 @@ public class SignService {
             tx.setSignedDocuments(signedData);
             tx.setStatus("SIGNED");
             repository.save(tx);
+            
+            // Записать изменение статуса в историю
+            recordStatusChange(transactionId, oldStatus, "SIGNED", "Signature validation successful");
+            
             return true;
         } else {
             log.error("Signature validation failed for transactionId: {}", transactionId);
             tx.setStatus("FAILED");
             repository.save(tx);
+            
+            // Записать изменение статуса в историю
+            recordStatusChange(transactionId, oldStatus, "FAILED", "Signature validation failed");
+            
             return false;
         }
     }
@@ -426,5 +460,69 @@ public class SignService {
             log.error("General error during EDS validation: {}", e.getMessage(), e);
             return false;
         }
+    }
+
+    /**
+     * Записать изменение статуса транзакции в историю
+     */
+    private void recordStatusChange(String transactionId, String oldStatus, String newStatus, String reason) {
+        try {
+            TransactionStatusHistory history = TransactionStatusHistory.builder()
+                    .transactionId(transactionId)
+                    .oldStatus(oldStatus)
+                    .newStatus(newStatus)
+                    .changedAt(ZonedDateTime.now())
+                    .changedReason(reason)
+                    .build();
+            
+            statusHistoryRepository.save(history);
+            log.debug("Status change recorded: {} -> {} for transaction: {}", oldStatus, newStatus, transactionId);
+        } catch (Exception e) {
+            log.error("Failed to record status change for transaction {}: {}", transactionId, e.getMessage());
+            // Не бросаем исключение, чтобы не нарушить основной flow
+        }
+    }
+
+    /**
+     * Проверить токен аутентификации (для authType = Token)
+     * 
+     * @param rawToken Токен из запроса
+     * @param storedHash Хеш токена из БД
+     * @return true если токен совпадает
+     */
+    public boolean validateTokenHash(String rawToken, String storedHash) {
+        if (rawToken == null || storedHash == null) {
+            return false;
+        }
+        
+        try {
+            boolean matches = passwordEncoder.matches(rawToken, storedHash);
+            log.debug("Token validation result: {}", matches);
+            return matches;
+        } catch (Exception e) {
+            log.error("Error validating token: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Проверить токен для транзакции
+     * 
+     * @param transactionId ID транзакции
+     * @param rawToken Токен из запроса
+     * @return true если токен валиден
+     */
+    public boolean validateToken(String transactionId, String rawToken) {
+        Optional<SignTransaction> txOpt = repository.findById(transactionId);
+        
+        if (txOpt.isEmpty()) {
+            log.error("Transaction not found: {}", transactionId);
+            return false;
+        }
+        
+        SignTransaction tx = txOpt.get();
+        String storedHash = tx.getAuthTokenHash();
+        
+        return validateTokenHash(rawToken, storedHash);
     }
 }

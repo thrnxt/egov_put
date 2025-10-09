@@ -50,15 +50,24 @@ public class SignController {
         }
 
         String baseUrl = request.getRequestURL().toString().replace(request.getRequestURI(), request.getContextPath());
-        String id = signService.initNewSigningTransaction(baseUrl, body, clientIdentifier);
+        String[] result = signService.initNewSigningTransaction(baseUrl, body, clientIdentifier);
+        String id = result[0];
+        String rawToken = result[1]; // Может быть null
+        
         String api1Url = baseUrl + "/api/v1/egov-api1/" + id;
 
-        return ResponseEntity.ok(Map.of(
-                "transactionId", id,
-                "api1", api1Url,
-                "qr", "mobileSign:" + api1Url
-//                "cross", "https://m.egov.kz/mobileSign/?link=" + api1Url
-        ));
+        Map<String, String> response = new java.util.HashMap<>();
+        response.put("transactionId", id);
+        response.put("api1", api1Url);
+        response.put("qr", "mobileSign:" + api1Url);
+        
+        // Если токен был сгенерирован, вернем его клиенту
+        // Клиент должен сохранить его для дальнейших запросов
+        if (rawToken != null) {
+            response.put("authToken", rawToken);
+        }
+
+        return ResponseEntity.ok(response);
     }
 
     @GetMapping("/egov-api1/{transactionId}")
@@ -90,7 +99,6 @@ public class SignController {
 
         Api1Response api1 = api1Opt.get();
         String authType = api1.document().authType();
-        String authToken = api1.document().authToken();
         
         log.debug("Auth type for transaction {}: {}", transactionId, authType);
 
@@ -98,12 +106,24 @@ public class SignController {
         if ("Token".equals(authType)) {
             // Проверка токена в заголовке Authorization
             log.debug("Validating Token authentication");
-            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || 
-                !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length()))) {
-                log.error("Token authentication failed for transaction: {}", transactionId);
+            
+            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
+                log.error("Token authentication failed: missing or invalid Authorization header");
                 return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
                         "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
             }
+            
+            String rawToken = authorizationHeader.substring(BEARER_PREFIX.length());
+            
+            // Проверяем токен через хеш, сохраненный в БД
+            boolean isValid = signService.validateToken(transactionId, rawToken);
+            
+            if (!isValid) {
+                log.error("Token authentication failed for transaction: {}", transactionId);
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                        "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
+            }
+            
             log.info("Token authentication successful");
         } else if ("Eds".equals(authType)) {
             // Проверка EDS аутентификации через подписанный XML
@@ -146,7 +166,7 @@ public class SignController {
             log.info("Successfully retrieved documents for signing for transaction: {}", transactionId);
             return ResponseEntity.ok(docs.get());
         }
-        
+        String sml = 
         log.error("Failed to retrieve documents for transaction: {}", transactionId);
         return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
                 "Транзакция истекла или не готова к подписанию.", "Транзакция мерзімі өтті немесе қол қоюға дайын емес.");
@@ -170,16 +190,29 @@ public class SignController {
 
         Api1Response api1 = api1Opt.get();
         String authType = api1.document().authType();
-        String authToken = api1.document().authToken();
         
         // Проверка авторизации в зависимости от типа
         if ("Token".equals(authType)) {
-            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX) || 
-                !authToken.equals(authorizationHeader.substring(BEARER_PREFIX.length()))) {
+            log.debug("Validating Token authentication for PUT request");
+            
+            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
+                log.error("Token authorization failed: missing or invalid Authorization header");
+                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, 
+                    "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
+            }
+            
+            String rawToken = authorizationHeader.substring(BEARER_PREFIX.length());
+            
+            // Проверяем токен через хеш, сохраненный в БД
+            boolean isValid = signService.validateToken(transactionId, rawToken);
+            
+            if (!isValid) {
                 log.error("Token authorization failed for transactionId: {}", transactionId);
                 return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, 
                     "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
             }
+            
+            log.info("Token authentication successful for PUT request");
         } else if ("Eds".equals(authType)) {
             // Для EDS аутентификации проверка уже была выполнена при GET/POST запросе
             // При PUT запросе мы просто проверяем, что транзакция существует и активна

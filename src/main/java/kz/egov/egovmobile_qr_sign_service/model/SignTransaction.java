@@ -1,61 +1,65 @@
 package kz.egov.egovmobile_qr_sign_service.model;
 
+import io.hypersistence.utils.hibernate.type.json.JsonBinaryType;
 import jakarta.persistence.*;
-import kz.egov.egovmobile_qr_sign_service.config.Api2ResponseConverter;
 import kz.egov.egovmobile_qr_sign_service.dto.Api2Response;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.Type;
+
 import java.time.ZonedDateTime;
 
 @Entity
-@Table(name = "sign_transactions")
+@Table(name = "sign_transactions", indexes = {
+        @Index(name = "idx_transactions_status", columnList = "status"),
+        @Index(name = "idx_transactions_expiry_date", columnList = "expiry_date"),
+        @Index(name = "idx_transactions_creation_date", columnList = "creation_date"),
+        @Index(name = "idx_transactions_organisation", columnList = "organisation_id")
+})
 @Data
 @NoArgsConstructor
 public class SignTransaction {
 
     @Id
-    private String transactionId; // Используем внешний ID как PK
+    @Column(name = "transaction_id")
+    private String transactionId;
 
-    @Column(nullable = false)
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "organisation_id", referencedColumnName = "id")
+    private Organisation organisation;
+
+    @Column(name = "creation_date", nullable = false)
     private ZonedDateTime creationDate = ZonedDateTime.now();
 
-    @Column(nullable = false)
+    @Column(name = "expiry_date", nullable = false)
     private ZonedDateTime expiryDate;
 
-    @Column(nullable = false)
+    @Column(name = "auth_type", nullable = false, length = 50)
     private String authType; // Token, Eds, None
 
-    // В реале: токен может быть зашифрован или храниться в другом месте
-    @Column
-    private String authToken;
+    // Хешированный токен (BCrypt)
+    @Column(name = "auth_token_hash", length = 255)
+    private String authTokenHash;
 
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "TEXT")
     private String description;
 
-    // Organisation info for API #1
-    @Column private String orgNameRu;
-    @Column private String orgNameKz;
-    @Column private String orgNameEn;
-    @Column private String orgBin;
-
-    @Column(nullable = false)
+    @Column(name = "api2_uri", nullable = false, length = 512)
     private String api2Uri;
 
-    @Column(nullable = false)
+    @Column(name = "back_url", nullable = false, length = 512)
     private String backUrl;
 
-    @Column(nullable = false)
+    @Column(nullable = false, length = 50)
     private String status; // PENDING, SIGNED, FAILED
 
-    // Документы для подписания (хранятся как JSON в БД)
-    @Lob
-    @Convert(converter = Api2ResponseConverter.class)
-    @Column(name = "documents_to_sign", columnDefinition = "TEXT")
+    // Документы для подписания (хранятся как JSONB в PostgreSQL)
+    @Type(JsonBinaryType.class)
+    @Column(name = "documents_to_sign", columnDefinition = "jsonb")
     private Api2Response documentsForSigning;
 
-    // Результат подписания (хранятся как JSON в БД)
-    @Lob
-    @Convert(converter = Api2ResponseConverter.class)
-    @Column(name = "signed_documents", columnDefinition = "TEXT")
+    // Результат подписания (хранятся как JSONB в PostgreSQL)
+    @Type(JsonBinaryType.class)
+    @Column(name = "signed_documents", columnDefinition = "jsonb")
     private Api2Response signedDocuments;
 }

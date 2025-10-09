@@ -6,3 +6,8 @@ import lombok.Data;
 public class EdsAuthRequest {
     private String xml; // Подписанный XML
 }
+
+
+
+
+
