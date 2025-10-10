@@ -22,7 +22,6 @@ public record Api1Response(
     @Builder
     public record Document(
             String uri, // API №2
-            @JsonProperty("auth_type") String authType, // Token, Eds, None
-            @JsonProperty("auth_token") String authToken // Опционально
+            @JsonProperty("auth_type") String authType // Только Eds
     ) {}
 }

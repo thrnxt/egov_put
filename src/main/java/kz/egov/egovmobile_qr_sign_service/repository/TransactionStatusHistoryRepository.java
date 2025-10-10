@@ -8,15 +8,7 @@ import java.util.List;
 
 @Repository
 public interface TransactionStatusHistoryRepository extends JpaRepository<TransactionStatusHistory, Long> {
-    
-    /**
-     * Получить всю историю статусов для транзакции
-     */
     List<TransactionStatusHistory> findByTransactionIdOrderByChangedAtDesc(String transactionId);
-    
-    /**
-     * Получить последнее изменение статуса для транзакции
-     */
     TransactionStatusHistory findFirstByTransactionIdOrderByChangedAtDesc(String transactionId);
 }
 

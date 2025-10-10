@@ -21,10 +21,9 @@ public class WebClientConfig {
 
     @Bean
     public WebClient webClient() {
-        // Настройка HTTP клиента с таймаутами
         HttpClient httpClient = HttpClient.create()
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000) // 5 сек на подключение
-                .responseTimeout(timeout) // 15 сек на ответ (из конфига)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
+                .responseTimeout(timeout)
                 .option(ChannelOption.SO_KEEPALIVE, true)
                 .option(ChannelOption.TCP_NODELAY, true);
 

@@ -39,7 +39,6 @@ public class OrganisationService {
         
         if (existing.isPresent()) {
             log.debug("Organisation found with BIN: {}", bin);
-            // Можно здесь обновить данные организации, если они изменились
             Organisation org = existing.get();
             boolean needsUpdate = false;
             

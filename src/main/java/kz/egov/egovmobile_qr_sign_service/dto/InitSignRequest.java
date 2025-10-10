@@ -23,7 +23,6 @@ public class InitSignRequest {
 
     @Valid
     private DocumentAuth document;
-
     @Size(max = 512, message = "Back URL too long (max 512 characters)")
     private String backUrl;
 
@@ -53,11 +52,7 @@ public class InitSignRequest {
     public static class DocumentAuth {
         @JsonProperty("auth_type") 
         @Size(max = 50, message = "Auth type too long (max 50 characters)")
-        private String authType; // Token, Eds, None
-        
-        @JsonProperty("auth_token") 
-        @Size(max = 255, message = "Auth token too long (max 255 characters)")
-        private String authToken;
+        private String authType;
     }
 }
 

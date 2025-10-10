@@ -12,7 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.validation.annotation.Validated;
 import jakarta.validation.Valid;
 import java.util.Map;
 import java.util.Optional;
@@ -24,7 +23,6 @@ import java.util.Optional;
 public class SignController {
 
     private final SignService signService;
-    private static final String BEARER_PREFIX = "Bearer ";
 
     private ResponseEntity<?> localizedError(HttpStatus status, String lang, String ruMessage, String kkMessage) {
         String message;
@@ -39,36 +37,21 @@ public class SignController {
     }
 
     @PostMapping("/mgovSign")
-    public ResponseEntity<Map<String, String>> initiateSigning(@Valid @RequestBody InitSignRequest body,
+    public ResponseEntity<String> initiateSigning(@Valid @RequestBody InitSignRequest body,
                                                                HttpServletRequest request) {
         String clientIdentifier = request.getHeader("X-Client-ID");
         if (clientIdentifier == null) clientIdentifier = "unknown-client";
 
-        // Строгая валидация структуры API №2
         var err = signService.validateInitRequest(body);
         if (err.isPresent()) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(Map.of("message", err.get()));
+                    .body(err.get());
         }
 
         String baseUrl = request.getRequestURL().toString().replace(request.getRequestURI(), request.getContextPath());
-        String[] result = signService.initNewSigningTransaction(baseUrl, body, clientIdentifier);
-        String id = result[0];
-        String rawToken = result[1]; // Может быть null
-        
-        String api1Url = baseUrl + "/api/v1/egov-api1/" + id;
-
-        Map<String, String> response = new java.util.HashMap<>();
-        response.put("transactionId", id);
-        response.put("api1", api1Url);
-        response.put("qr", "mobileSign:" + api1Url);
-        
-        // Если токен был сгенерирован, вернем его клиенту
-        // Клиент должен сохранить его для дальнейших запросов
-        if (rawToken != null) {
-            response.put("authToken", rawToken);
-        }
-
+        String transactionId = signService.initNewSigningTransaction(baseUrl, body, clientIdentifier);
+        String api1Url = baseUrl + "/api/v1/egov-api1/" + transactionId;
+        String response = "mobileSign:" + api1Url;
         return ResponseEntity.ok(response);
     }
 
@@ -84,12 +67,11 @@ public class SignController {
         return localizedError(HttpStatus.NOT_FOUND, acceptLanguage,
                 "Транзакция не найдена.", "Транзакция табылмады.");
     }
-    @RequestMapping(value = "/sign-process/{transactionId}", method = {RequestMethod.GET, RequestMethod.POST})
+    @PostMapping("/sign-process/{transactionId}")
     public ResponseEntity<?> getDocumentsForSigning(
             @PathVariable String transactionId,
-            @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
             @RequestHeader(value = "Accept-Language", defaultValue = "ru", required = false) String acceptLanguage,
-            @RequestBody(required = false) EdsAuthRequest edsAuthBody
+            @RequestBody EdsAuthRequest edsAuthBody
     ) {
         log.info("Processing sign-process request for transactionId: {}", transactionId);
         
@@ -104,64 +86,37 @@ public class SignController {
         
         log.debug("Auth type for transaction {}: {}", transactionId, authType);
 
-        // Проверка авторизации в зависимости от типа
-        if ("Token".equals(authType)) {
-            // Проверка токена в заголовке Authorization
-            log.debug("Validating Token authentication");
-            
-            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
-                log.error("Token authentication failed: missing or invalid Authorization header");
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                        "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
-            }
-            
-            String rawToken = authorizationHeader.substring(BEARER_PREFIX.length());
-            
-            // Проверяем токен через хеш, сохраненный в БД
-            boolean isValid = signService.validateToken(transactionId, rawToken);
-            
-            if (!isValid) {
-                log.error("Token authentication failed for transaction: {}", transactionId);
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                        "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
-            }
-            
-            log.info("Token authentication successful");
-        } else if ("Eds".equals(authType)) {
-            // Проверка EDS аутентификации через подписанный XML
-            log.debug("Validating EDS authentication");
-            
-            if (edsAuthBody == null || edsAuthBody.getXml() == null || edsAuthBody.getXml().isBlank()) {
-                log.error("EDS authentication failed: missing signed XML in request body");
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                        "Отсутствует подписанный XML для аутентификации.", "Аутентификация үшін қол қойылған XML жоқ.");
-            }
-            
-            log.debug("Signed XML received, length: {} characters", edsAuthBody.getXml().length());
-            
-            // Валидация подписанного XML через NCANode
-            boolean isValidEds = signService.validateEdsAuthentication(
-                edsAuthBody.getXml(), 
-                api1.document().uri()
-            );
-            
-            if (!isValidEds) {
-                log.error("EDS authentication validation failed for transaction: {}", transactionId);
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
-                        "ЭЦП аутентификация не прошла проверку. Подпись недействительна или данные не соответствуют.", 
-                        "ЭҚТ аутентификациясы тексеруден өтпеді. Қолтаңба жарамсыз немесе деректер сәйкес келмейді.");
-            }
-            
-            log.info("EDS authentication successful for transaction: {}", transactionId);
-        } else if ("None".equals(authType)) {
-            log.debug("No authentication required");
-        } else {
-            log.error("Unknown auth type: {}", authType);
+        if (!"Eds".equals(authType)) {
+            log.error("Invalid auth type: {}. Only Eds is supported.", authType);
             return localizedError(HttpStatus.BAD_REQUEST, acceptLanguage,
-                    "Неизвестный тип аутентификации.", "Аутентификацияның белгісіз түрі.");
+                    "Неподдерживаемый тип аутентификации. Поддерживается только Eds.", "Қолдау көрсетілмейтін аутентификация түрі. Тек Eds қолдау көрсетіледі.");
         }
 
-        // Получение данных для подписания
+        log.debug("Validating EDS authentication");
+        
+        if (edsAuthBody == null || edsAuthBody.getXml() == null || edsAuthBody.getXml().isBlank()) {
+            log.error("EDS authentication failed: missing signed XML in request body");
+            return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                    "Отсутствует подписанный XML для аутентификации.", "Аутентификация үшін қол қойылған XML жоқ.");
+        }
+        
+        log.debug("Signed XML received, length: {} characters", edsAuthBody.getXml().length());
+        
+        // Валидация подписанного XML через NCANode
+        boolean isValidEds = signService.validateEdsAuthentication(
+            edsAuthBody.getXml(), 
+            api1.document().uri()
+        );
+        
+        if (!isValidEds) {
+            log.error("EDS authentication validation failed for transaction: {}", transactionId);
+            return localizedError(HttpStatus.FORBIDDEN, acceptLanguage,
+                    "ЭЦП аутентификация не прошла проверку. Подпись недействительна или данные не соответствуют.", 
+                    "ЭҚТ аутентификациясы тексеруден өтпеді. Қолтаңба жарамсыз немесе деректер сәйкес келмейді.");
+        }
+        
+        log.info("EDS authentication successful for transaction: {}", transactionId);
+
         log.debug("Retrieving documents for signing");
         Optional<Api2Response> docs = signService.getDocumentsToSign(transactionId);
         if (docs.isPresent()) {
@@ -176,7 +131,6 @@ public class SignController {
     @PutMapping("/sign-process/{transactionId}")
     public ResponseEntity<?> sendSignedDocuments(
             @PathVariable String transactionId,
-            @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
             @RequestHeader(value = "Accept-Language", defaultValue = "ru", required = false) String acceptLanguage,
             @Valid @RequestBody Api2Response signedData
     ) {
@@ -192,37 +146,19 @@ public class SignController {
         Api1Response api1 = api1Opt.get();
         String authType = api1.document().authType();
         
-        // Проверка авторизации в зависимости от типа
-        if ("Token".equals(authType)) {
-            log.debug("Validating Token authentication for PUT request");
-            
-            if (authorizationHeader == null || !authorizationHeader.startsWith(BEARER_PREFIX)) {
-                log.error("Token authorization failed: missing or invalid Authorization header");
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, 
-                    "Неверный токен авторизации или токен отсутствует.", "Авторизация таңбалауышы қате немесе жоқ.");
-            }
-            
-            String rawToken = authorizationHeader.substring(BEARER_PREFIX.length());
-            
-            // Проверяем токен через хеш, сохраненный в БД
-            boolean isValid = signService.validateToken(transactionId, rawToken);
-            
-            if (!isValid) {
-                log.error("Token authorization failed for transactionId: {}", transactionId);
-                return localizedError(HttpStatus.FORBIDDEN, acceptLanguage, 
-                    "Неверный токен авторизации.", "Авторизация таңбалауышы қате.");
-            }
-            
-            log.info("Token authentication successful for PUT request");
-        } else if ("Eds".equals(authType)) {
-            // Для EDS аутентификации проверка уже была выполнена при GET/POST запросе
-            // При PUT запросе мы просто проверяем, что транзакция существует и активна
-            log.debug("EDS authentication - transaction already validated");
+        if (!"Eds".equals(authType)) {
+            log.error("Invalid auth type: {}. Only Eds is supported.", authType);
+            return localizedError(HttpStatus.BAD_REQUEST, acceptLanguage,
+                    "Неподдерживаемый тип аутентификации. Поддерживается только Eds.", "Қолдау көрсетілмейтін аутентификация түрі. Тек Eds қолдау көрсетіледі.");
         }
+
+        // Для EDS аутентификации проверка уже была выполнена при POST запросе
+        // При PUT запросе мы просто проверяем, что транзакция существует и активна
+        log.debug("EDS authentication - transaction already validated");
 
         log.info("Authorization successful, proceeding to validation");
 
-        // Обработка и реальная валидация через NCANode
+        // Обработка и валидация через ncanode
         boolean success = signService.processSignedDocuments(transactionId, signedData);
 
         if (success) {

@@ -35,11 +35,7 @@ public class SignTransaction {
     private ZonedDateTime expiryDate;
 
     @Column(name = "auth_type", nullable = false, length = 50)
-    private String authType; // Token, Eds, None
-
-    // Хешированный токен (BCrypt)
-    @Column(name = "auth_token_hash", length = 255)
-    private String authTokenHash;
+    private String authType;
 
     @Column(nullable = false, columnDefinition = "TEXT")
     private String description;
@@ -51,14 +47,12 @@ public class SignTransaction {
     private String backUrl;
 
     @Column(nullable = false, length = 50)
-    private String status; // PENDING, SIGNED, FAILED
+    private String status;
 
-    // Документы для подписания (хранятся как JSONB в PostgreSQL)
     @Type(JsonBinaryType.class)
     @Column(name = "documents_to_sign", columnDefinition = "jsonb")
     private Api2Response documentsForSigning;
 
-    // Результат подписания (хранятся как JSONB в PostgreSQL)
     @Type(JsonBinaryType.class)
     @Column(name = "signed_documents", columnDefinition = "jsonb")
     private Api2Response signedDocuments;

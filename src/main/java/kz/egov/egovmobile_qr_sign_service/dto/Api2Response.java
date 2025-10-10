@@ -14,7 +14,7 @@ import java.util.List;
 public record Api2Response(
         @NotNull(message = "Sign method is required")
         @Size(max = 50, message = "Sign method too long (max 50 characters)")
-        String signMethod, // XML, CMS_WITH_DATA, etc.
+        String signMethod, // xml, cms-with-data...
         
         @Min(value = 1, message = "Version must be at least 1")
         @Max(value = 10, message = "Version too high (max 10)")

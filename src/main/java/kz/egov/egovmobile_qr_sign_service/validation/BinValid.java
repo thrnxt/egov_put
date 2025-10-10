@@ -9,14 +9,6 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-/**
- * Аннотация для валидации БИН (Бизнес-идентификационный номер) Республики Казахстан
- * 
- * Проверяет:
- * - Формат: ровно 12 цифр
- * - Не может быть 000000000000
- * - Формальная валидация (без проверки контрольной суммы)
- */
 @Documented
 @Constraint(validatedBy = BinValidator.class)
 @Target({ElementType.FIELD, ElementType.PARAMETER})
